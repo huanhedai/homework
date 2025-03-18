@@ -1,0 +1,180 @@
+#include <petscsnes.h>
+#include <petscdmda.h>
+#include "def.h"
+#include "math.h"
+#include "stdlib.h"
+#include "petscsys.h"
+
+#undef __FUNCT__
+#define __FUNCT__ "MY_ApplyFunction"
+PetscErrorCode MY_ApplyFunction(Field **x, Field **f, PetscScalar factor, void *ptr)
+{
+  PetscErrorCode ierr;
+  UserCtx        *user  = (UserCtx *)ptr;
+  TstepCtx       *tsctx = user->tsctx;
+  DM             da    = user->da;
+  PetscScalar    dx = user->dx, dy = user->dy;
+  PetscInt       i, j, mx, my, xl, yl, zl, nxl, nyl, nzl, xg, yg, zg, nxg, nyg, nzg;
+  PetscScalar    TP_L, TP_R, TP_B, TP_T, ITw_L, ITw_R, ITw_B, ITw_T;
+
+  PetscFunctionBegin;
+  mx = user->n1; // 剖分段数
+  my = user->n2;
+  
+  ierr = DMDAGetGhostCorners(da, &xg, &yg, &zg, &nxg, &nyg, &nzg);
+  CHKERRQ(ierr);
+  /* 包含鬼点
+	nxg 是当前核在 x 方向上处理的网格点数量
+	nyg 是当前核在 y 方向上处理的网格点数量
+
+	以12 * 12的网格剖分为例, 那么每个方向加上鬼点就会有14个网格
+  xg 和 yg是【当前核其负责区域】在【全局区域】的左下角索引值, 注意此时最小索引值不再是0, 而是-1; 最大索引值不再是11, 而是12
+
+	若用1个核，则 nxg = 14, nyg = 14 , 求解区域被划分成一份
+	若用2个核，则 nxg = 14, nyg =  8 , 求解区域被划分成二份
+	*/
+  
+  ierr = DMDAGetGhostCorners(da, &xg, &yg, &zg, &nxg, &nyg, &nzg);
+  CHKERRQ(ierr);
+  ierr = DMDAGetCorners(da, &xl, &yl, &zl, &nxl, &nyl, &nzl);
+  CHKERRQ(ierr);
+
+// 设置边界条件
+#if EXAMPLE == 1
+if (xl == 0) {
+    for (j = yg; j < yg + nyg; j++) {
+        x[j][-1].p = - q_in * dx + x[j][0].p;
+        x[j][-1].s = x[j][0].s;
+    }
+  }
+if (xl + nxl == mx) {
+    for (j = yg; j < yg + nyg; j++) {
+        x[j][mx].p = p_out;
+        x[j][mx].s = x[j][mx-1].s;
+    }
+  }
+if (yl == 0) {
+    for (i = xg; i < xg + nxg; i++) {
+        x[-1][i].p = x[0][i].p;
+        x[-1][i].s = x[0][i].s;
+    }
+  }
+if (yl + nyl == my) {
+    for (i = xg; i < xg + nxg; i++) {
+        x[my][i].p = x[my-1][i].p;
+        x[my][i].s = x[my-1][i].s;
+    }
+  }
+#endif
+
+  for (j = yl; j < yl + nyl; j++)
+    {
+        for (i = xl; i < xl + nxl; i++)
+        {
+            // TP_L = -((lambda_t(x[j][i - 1].s) + lambda_t(x[j][i].s)) / 2) * ((x[j][i].p - x[j][i - 1].p) / dx);
+            // TP_R = -((lambda_t(x[j][i + 1].s) + lambda_t(x[j][i].s)) / 2) * ((x[j][i + 1].p - x[j][i].p) / dx);
+            // TP_B = -((lambda_t(x[j - 1][i].s) + lambda_t(x[j][i].s)) / 2) * ((x[j][i].p - x[j - 1][i].p) / dy);
+            // TP_T = -((lambda_t(x[j + 1][i].s) + lambda_t(x[j][i].s)) / 2) * ((x[j + 1][i].p - x[j][i].p) / dy);
+            // f[j][i].s = k*(TP_R-TP_L)/dx+k*(TP_T-TP_B)/dy;
+            
+
+            TP_L = -((lambda_n(x[j][i - 1].s) + lambda_n(x[j][i].s)) / 2) * ((x[j][i].p - x[j][i - 1].p) / dx);
+            TP_R = -((lambda_n(x[j][i + 1].s) + lambda_n(x[j][i].s)) / 2) * ((x[j][i + 1].p - x[j][i].p) / dx);
+            TP_B = -((lambda_n(x[j - 1][i].s) + lambda_n(x[j][i].s)) / 2) * ((x[j][i].p - x[j - 1][i].p) / dy);
+            TP_T = -((lambda_n(x[j + 1][i].s) + lambda_n(x[j][i].s)) / 2) * ((x[j + 1][i].p - x[j][i].p) / dy);
+            f[j][i].s = k*(TP_R-TP_L)/dx+k*(TP_T-TP_B)/dy;
+
+            ITw_L = -((lambda_w(x[j][i - 1].s) + lambda_w(x[j][i].s)) / 2) * ((x[j][i].p - x[j][i - 1].p) / dx);
+            ITw_R = -((lambda_w(x[j][i + 1].s) + lambda_w(x[j][i].s)) / 2) * ((x[j][i + 1].p - x[j][i].p) / dx);
+            ITw_B = -((lambda_w(x[j - 1][i].s) + lambda_w(x[j][i].s)) / 2) * ((x[j][i].p - x[j - 1][i].p) / dy);
+            ITw_T = -((lambda_w(x[j + 1][i].s) + lambda_w(x[j][i].s)) / 2) * ((x[j + 1][i].p - x[j][i].p) / dy);
+
+            f[j][i].p = k*(ITw_R-ITw_L)/dx+k*(ITw_T-ITw_B)/dy;
+
+        }
+    }
+  PetscFunctionReturn(0);
+}
+
+#undef __FUNCT__
+#define __FUNCT__ "FormFunction"
+PetscErrorCode FormFunction(SNES snes, Vec X, Vec F, void *ptr)
+{
+  PetscErrorCode  ierr;
+  UserCtx        *user  = (UserCtx *)ptr;
+  TstepCtx       *tsctx = user->tsctx;
+  DM              da    = user->da;
+  PetscInt        order;
+  PetscScalar     dx = user->dx, dy = user->dy;
+  Vec             loc_Xold, loc_Xoold, loc_X;
+  Field           **X_old, **x, **f, **X_oold;
+  PetscInt        i, j;
+  PetscInt        xl, yl, zl, nxl, nyl, nzl, xg, yg, zg, nxg, nyg, nzg;
+
+  PetscFunctionBegin;
+
+  ierr = DMDAGetGhostCorners(da, &xg, &yg, &zg, &nxg, &nyg, &nzg);
+  CHKERRQ(ierr);
+  ierr = DMDAGetCorners(da, &xl, &yl, &zl, &nxl, &nyl, &nzl);
+  CHKERRQ(ierr);
+
+  /*
+  在并行计算中，每个进程只需要处理它所拥有的局部数据。
+  DMGetLocalVector 提供了一种方便的方式来获取这些局部数据的存储。
+  */
+  //DMGetLocalVector 获取局部向量(loc_X是指向这个局部向量的指针)
+  ierr = DMGetLocalVector(da, &loc_X);
+  CHKERRQ(ierr);
+  ierr = DMGetLocalVector(da, &loc_Xold);
+  CHKERRQ(ierr);
+  /* 将全局向量的数据传输到局部向量 */
+  ierr = DMGlobalToLocalBegin(da, X, INSERT_VALUES, loc_X); // INSERT_VALUES 表示要插入的值会覆盖局部向量中已有的值
+  CHKERRQ(ierr);
+  ierr = DMGlobalToLocalEnd(da, X, INSERT_VALUES, loc_X); // 结束传输
+  CHKERRQ(ierr);
+  ierr = DMGlobalToLocalBegin(da, user->sol_old, INSERT_VALUES, loc_Xold);
+  CHKERRQ(ierr);
+  ierr = DMGlobalToLocalEnd(da, user->sol_old, INSERT_VALUES, loc_Xold);
+  CHKERRQ(ierr);
+
+  /*  DMDAVecGetArray(da, loc_X, &x);
+  获取与分布式网格（DM）对象相关的局部向量 loc_X 数据的函数。
+  它允许用户直接访问 loc_X 的数组数据，以便进行计算或修改。
+  +++++ 可以通过调用 x 去直接访问修改 loc_X 的值。+++++
+
+  这么做的原因是 ———— 直接操作数组通常比通过 PETSc 的向量接口进行操作更高效，尤其是在需要进行大量计算时。
+  */
+  ierr = DMDAVecGetArray(da, loc_X, &x);
+  CHKERRQ(ierr);
+  ierr = DMDAVecGetArray(da, loc_Xold, &X_old);
+  CHKERRQ(ierr);
+
+  ierr = DMDAVecGetArray(da, F, &f);
+  CHKERRQ(ierr);
+  ierr = MY_ApplyFunction((Field **)x, (Field **)f, 1.0, user);
+  CHKERRQ(ierr);
+
+    for (j = yl; j < yl + nyl; j++) {
+      for (i = xl; i < xl + nxl; i++) {
+        f[j][i].p += (phi) * (x[j][i].s - X_old[j][i].s) / tsctx->tsize;
+        f[j][i].s += (phi) * ( X_old[j][i].s - x[j][i].s) / tsctx->tsize;
+      }
+    }
+  /*  DMDAVecRestoreArray(da, loc_X, &x);
+    释放之前通过 DMDAVecGetArray 函数获取的局部向量数据，即释放 x 
+  */
+  ierr = DMDAVecRestoreArray(da, loc_Xold, &X_old);
+  CHKERRQ(ierr);
+  ierr = DMDAVecRestoreArray(da, loc_X, &x);
+  CHKERRQ(ierr);
+  ierr = DMDAVecRestoreArray(da, F, &f);
+  CHKERRQ(ierr);
+
+
+  // 释放局部向量 DMRestoreLocalVector
+  ierr = DMRestoreLocalVector(da, &loc_Xold);
+  CHKERRQ(ierr);
+  ierr = DMRestoreLocalVector(da, &loc_X);
+  CHKERRQ(ierr);
+  PetscFunctionReturn(0);
+}
